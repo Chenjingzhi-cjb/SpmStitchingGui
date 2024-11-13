@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/list">
+        <file>resource/Add.svg</file>
+        <file>resource/Down.svg</file>
+        <file>resource/Sub.svg</file>
+        <file>resource/Up.svg</file>
+    </qresource>
+    <qresource prefix="/ui">
+        <file>resource/icon.ico</file>
+    </qresource>
+</RCC>
