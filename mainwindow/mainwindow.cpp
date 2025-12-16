@@ -37,10 +37,16 @@ void MainWindow::on_btn_add_clicked() {
                     printLog("Reading spm file \"" + paths[i] + "\" error!", "error");
                     continue;
                 }
-                SpmAlgorithm::flattenFirst(spm.getImageSingle());
+
+                auto &spm_image = spm.getImageSingle();
+                SpmAlgorithm::flattenFirst(spm_image);
+                cv::Mat image = SpmAlgorithm::spmImageToImage(spm_image);
 
                 // add spm offset nm
                 m_spm_offset_nm_list.emplace_back(std::pair<int, int>{spm.getXOffsetNM(), spm.getYOffsetNM()});
+
+                // add image flatten filst
+                m_image_f1_list.emplace_back(image);
 
                 // add spm reader
                 m_spm_reader_list.emplace_back(std::move(spm));
@@ -93,13 +99,16 @@ void MainWindow::on_btn_down_clicked() {
 
 void MainWindow::on_btn_preview_clicked() {
     SpmStitching stitching;
-    stitching.execStitchingPreview(m_spm_reader_list);
+    cv::Mat stitched_image;
+    if (stitching.execStitchingImage(m_image_f1_list, &stitched_image).empty()) {
+        printLog("Image stitching preview failed!", "error");
+        return;
+    }
 
-    cv::Mat stitched_image = stitching.getStitchedImage();
-    applyColorMap(stitched_image, m_preview_image, cv::COLORMAP_PLASMA);
+    cv::applyColorMap(stitched_image, m_preview_image, cv::COLORMAP_PLASMA);
 
     updatePreviewImage();
-    printLog("Previewed stitched image successfully!", "info");
+    printLog("Image stitching preview successful!", "info");
 }
 
 void MainWindow::on_btn_save_clicked() {
@@ -110,13 +119,15 @@ void MainWindow::on_btn_save_clicked() {
     slashLeftToRight(save_file);
 
     SpmStitching stitching;
-    stitching.execStitching(m_spm_reader_list,
-                            m_spm_path_list[0],
-                            save_file.toStdString(),
-                            ui->comboBox_spm_type->currentText().toStdString());
+    cv::Mat stitched_image;
+    if (!stitching.execStitching(m_spm_reader_list, m_image_f1_list,
+                                 save_file.toStdString(),
+                                 &stitched_image)) {
+        printLog("Spm stitching failed!", "error");
+        return;
+    }
 
-    cv::Mat stitched_image = stitching.getStitchedImage();
-    applyColorMap(stitched_image, m_preview_image, cv::COLORMAP_PLASMA);
+    cv::applyColorMap(stitched_image, m_preview_image, cv::COLORMAP_PLASMA);
 
     updatePreviewImage();
     printLog("Saved stitched image to \"" + save_file + "\" successfully!", "info");

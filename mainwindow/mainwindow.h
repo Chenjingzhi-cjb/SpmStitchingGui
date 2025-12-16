@@ -64,6 +64,7 @@ private:
 
     std::vector<std::string> m_spm_path_list;
     std::vector<SpmReader> m_spm_reader_list;
+    std::vector<cv::Mat> m_image_f1_list;
     std::vector<std::pair<int, int>> m_spm_offset_nm_list;
     cv::Mat m_preview_image;
 };

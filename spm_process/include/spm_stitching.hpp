@@ -11,41 +11,61 @@ public:
     ~SpmStitching() = default;
 
 public:
-    std::vector<std::vector<double>> execStitchingPreview(std::vector<SpmReader> &spm_reader_list) {
-        // 计算各图像对于上一幅图像的偏移量
-        std::vector<std::pair<int, int>> image_xy_offset_info;
-        for (int i = 0; i < spm_reader_list.size() - 1; ++i) {
-            image_xy_offset_info.emplace_back(calcImageOffsetInfo(spm_reader_list[i], spm_reader_list[i + 1]));
+    bool loadSpmfromSpmPath(std::vector<std::string> &spm_path_list, const std::string &image_type,
+                            std::vector<SpmReader> &spm_reader_list, std::vector<cv::Mat> &image_f1_list) {
+        // 实例化 spm 对象，进行一阶拉平处理并保存图像
+        spm_reader_list.clear();
+        image_f1_list.clear();
+
+        for (auto &i : spm_path_list) {
+            SpmReader spm(i, image_type);
+            if (!spm.readSpm()) {
+                std::cout << "loadSpmfromSpmPath() [Error]: Failed to read SPM file: " << i << std::endl;
+                return false;
+            }
+
+            auto &spm_image = spm.getImageSingle();
+            SpmAlgorithm::flattenFirst(spm_image);
+            cv::Mat image = SpmAlgorithm::spmImageToImage(spm_image);
+
+            // add
+            image_f1_list.emplace_back(image);
+            spm_reader_list.emplace_back(std::move(spm));
         }
 
-        // 计算各图像在最终图像中的位置信息
-        std::vector<std::vector<int>> image_pos_info = calcImagePosInfo(
-            spm_reader_list[0].getImageSingle().getCols(),
-            spm_reader_list[0].getImageSingle().getRows(),
-            image_xy_offset_info);
+        return true;
+    }
 
-        // 拼图
-        std::vector<std::vector<double>> stitching_image_data = stitchingImage(spm_reader_list, image_pos_info);
+    std::vector<std::vector<double>> execStitchingImage(std::vector<cv::Mat> &image_f1_list,
+                                                        cv::Mat *stitched_image = nullptr) {
+        // 图像数据拼接
+        int stitching_status;
+        auto stitching_image_data = stitchingImage(image_f1_list, &stitching_status);
+        if (stitching_status != 0) {
+            std::cout << "execStitchingImage() [Error]: Image stitching failed! Status code: "
+                      << stitching_status << std::endl;
+            return {};
+        }
 
-        m_stitched_image = SpmAlgorithm::array2DToImage(stitching_image_data);
-        cv::normalize(m_stitched_image, m_stitched_image, 255, 0, cv::NORM_MINMAX, CV_8U);
-
-        // 显示拼图结果
-        //        cv::Mat image_stitching = SpmAlgorithm::array2DToImage(stitching_image_data);
-        //        cv::normalize(image_stitching, image_stitching, 255, 0, cv::NORM_MINMAX, CV_8U);
-        //
-        //        namedWindow("img_stitching", cv::WINDOW_AUTOSIZE);
-        //        imshow("img_stitching", image_stitching);
-        //        cv::waitKey(0);
+        if (stitched_image) {
+            cv::Mat _stitched_image = SpmAlgorithm::array2DToImage(stitching_image_data);
+            cv::normalize(_stitched_image, _stitched_image, 255, 0, cv::NORM_MINMAX, CV_8U);
+            _stitched_image.copyTo(*stitched_image);
+        }
 
         return stitching_image_data;
     }
 
-    void execStitching(std::vector<SpmReader> &spm_reader_list,
-                       const std::string &tmpl_spm_path,
+    bool execStitching(std::vector<SpmReader> &spm_reader_list,
+                       std::vector<cv::Mat> &image_f1_list,
                        const std::string &output_spm_path,
-                       const std::string &image_type) {
-        std::vector<std::vector<double>> stitching_image_data = execStitchingPreview(spm_reader_list);
+                       cv::Mat *stitched_image = nullptr) {
+        std::vector<std::vector<double>> stitching_image_data = execStitchingImage(image_f1_list, stitched_image);
+        if (stitching_image_data.empty()) return false;
+
+        // 计算新的 scan size
+        auto &spm_image_first = spm_reader_list[0].getImageSingle();
+        int new_scan_size = (int) ((double) stitching_image_data.size() * spm_image_first.getScanSize() / spm_image_first.getRows());
 
         // 计算新的 z scale 并 保留 7 位小数 + .1
         double z_scale = calcNewZScale(spm_reader_list[0], stitching_image_data) * 1.5;  // "x1.5" 以避免超量程
@@ -53,161 +73,119 @@ public:
         std::string z_scale_str = doubleToDecimalString(z_scale, 7);
 
         // 基于拼图的 real data 计算 raw data 并变换为 byte data
-        std::vector<char> byte_data = calcRawDataToByteData(spm_reader_list[0], stitching_image_data, z_scale);
+        auto byte_data = calcRawDataToByteData(spm_reader_list[0], stitching_image_data, z_scale);
 
         // 构建文件头
-        if (!buildOutputSpmHeader(tmpl_spm_path, output_spm_path, image_type, (int) byte_data.size(), z_scale,
-                                  (int) stitching_image_data[0].size(), (int) stitching_image_data.size(), 100))
-            return;
+        if (!buildOutputSpmHeader(spm_reader_list[0].getSpmPath(), output_spm_path,
+                                  spm_reader_list[0].getImageTypeList()[0],
+                                  (int) byte_data.size(), z_scale,
+                                  (int) stitching_image_data[0].size(),
+                                  (int) stitching_image_data.size(), new_scan_size)) {
+            std::cout << "execStitching() [Error]: Failed to build output SPM header." << std::endl;
+            return false;
+        }
 
         // 文件头填充空数据
-        if (!fillNullToHeader(output_spm_path)) return;
+        if (!fillNullToHeader(output_spm_path)) return false;
 
         // 填充拼接后的图像数据 byte data
-        if (!fillStitchedImageData(output_spm_path, byte_data)) return;
-    }
+        if (!fillStitchedImageData(output_spm_path, byte_data)) return false;
 
-    cv::Mat getStitchedImage() {
-        return m_stitched_image;
+        return true;
     }
 
 private:
-    static std::pair<int, int> calcImageOffsetInfo(SpmReader &spm_tmpl, SpmReader &spm_offset) {
-        // 提取图像数据并进行相关处理
-        auto &spm_image_tmpl = spm_tmpl.getImageSingle();
-        cv::Mat image_tmpl = SpmAlgorithm::spmImageToImage(spm_image_tmpl);
-        cv::Mat image_tmpl_normal;
-        cv::normalize(image_tmpl, image_tmpl_normal, 255, 0, cv::NORM_MINMAX, CV_8U);
-
-        auto &spm_image_offset = spm_offset.getImageSingle();
-        cv::Mat image_offset = SpmAlgorithm::spmImageToImage(spm_image_offset);
-        cv::Mat image_offset_normal;
-        cv::normalize(image_offset, image_offset_normal, 255, 0, cv::NORM_MINMAX, CV_8U);
-
-        // 根据扫描偏移量计算模板匹配的相关参数
-        int x_diff = (int) ((spm_offset.getEngageXPosNM() + spm_offset.getXOffsetNM()) -
-                            (spm_tmpl.getEngageXPosNM() + spm_tmpl.getXOffsetNM()));
-        int y_diff = (int) ((spm_offset.getEngageYPosNM() + spm_offset.getYOffsetNM()) -
-                            (spm_tmpl.getEngageYPosNM() + spm_tmpl.getYOffsetNM()));
-
-        int image_tmpl_sub_x_start, image_tmpl_sub_y_start, image_tmpl_sub_width, image_tmpl_sub_height;
-        if (x_diff >= 0) {
-            image_tmpl_sub_x_start = (int) (spm_image_offset.getCols() * 0.1);
-            image_tmpl_sub_width = (int) ((1 - (double) x_diff / spm_image_offset.getScanSize() - 0.2) * spm_image_offset.getCols());
-        } else {  // x_diff < 0
-            image_tmpl_sub_x_start = (int) ((-1 * (double) x_diff / spm_image_offset.getScanSize() + 0.1) * spm_image_offset.getCols());
-            image_tmpl_sub_width = (int) (spm_image_offset.getCols() - image_tmpl_sub_x_start - spm_image_offset.getCols() * 0.1);
-        }
-        if (y_diff >= 0) {
-            image_tmpl_sub_y_start = (int) (((double) y_diff / spm_image_offset.getScanSize() + 0.1) * spm_image_offset.getRows());
-            image_tmpl_sub_height = (int) (spm_image_offset.getRows() - image_tmpl_sub_y_start - spm_image_offset.getRows() * 0.1);
-        } else {  // y_diff < 0
-            image_tmpl_sub_y_start = (int) (spm_image_offset.getRows() * 0.1);
-            image_tmpl_sub_height = (int) ((1 + (double) y_diff / spm_image_offset.getScanSize() - 0.2) * spm_image_offset.getRows());
+    static std::vector<std::vector<double>> stitchingImage(std::vector<cv::Mat> &image_f1_list, int *status = nullptr) {
+        if (image_f1_list.empty()) {
+            std::cout << "stitchingImage() [Error]: Input image list is empty." << std::endl;
+            if (status) *status = -1;
+            return {};
         }
 
-        // 模板匹配
-        cv::Mat image_tmpl_sub = image_tmpl_normal(
-                cv::Rect(image_tmpl_sub_x_start, image_tmpl_sub_y_start, image_tmpl_sub_width, image_tmpl_sub_height));
-        std::pair<int, int> offset_value = SpmAlgorithm::calcMatchTemplate(image_tmpl_sub, image_offset);
-
-        cv::Mat image_offset_sub = image_offset_normal(
-                cv::Rect(offset_value.first, offset_value.second, image_tmpl_sub_width, image_tmpl_sub_height));
-
-        // 显示匹配结果
-//        cv::rectangle(image_tmpl_normal,
-//                      cv::Rect(image_tmpl_sub_x_start, image_tmpl_sub_y_start, image_tmpl_sub_width,
-//                               image_tmpl_sub_height),
-//                      cv::Scalar(255), 2);
-//        cv::rectangle(image_offset_normal, cv::Rect(offset_value.first, offset_value.second, image_tmpl_sub_width,
-//                                             image_tmpl_sub_height), cv::Scalar(255), 2);
-//
-//        namedWindow("img_tmpl", cv::WINDOW_AUTOSIZE);
-//        imshow("img_tmpl", image_tmpl_normal);
-//        namedWindow("img_offset", cv::WINDOW_AUTOSIZE);
-//        imshow("img_offset", image_offset_normal);
-//        cv::waitKey(0);
-
-        // 返回偏移结果
-        return std::pair<int, int>{(int) std::round(image_tmpl_sub_x_start - offset_value.first),
-                                   (int) std::round(image_tmpl_sub_y_start - offset_value.second)};
-    }
-
-    static std::vector<std::vector<int>>
-    calcImagePosInfo(int image_width, int image_height, std::vector<std::pair<int, int>> &image_offset_info) {
-        // {{all_x_start, all_x_end, all_y_start, all_y_end}, {first}, {second}, ...}
-        std::vector<std::vector<int>> image_pos_info;
-
-        image_pos_info.emplace_back(std::vector<int>{0, image_width, 0, image_height});  // all
-        image_pos_info.emplace_back(std::vector<int>{0, image_width, 0, image_height});  // first
-
-        for (int i = 0; i < image_offset_info.size(); ++i) {
-            int current_x_start = image_pos_info[i + 1][0] + image_offset_info[i].first;
-            int current_x_end = image_pos_info[i + 1][1] + image_offset_info[i].first;
-            int current_y_start = image_pos_info[i + 1][2] + image_offset_info[i].second;
-            int current_y_end = image_pos_info[i + 1][3] + image_offset_info[i].second;
-
-            // change all
-            if (current_x_start < image_pos_info[0][0]) {
-                image_pos_info[0][0] = current_x_start;
+        // 检查图像有效性
+        for (size_t i = 0; i < image_f1_list.size(); ++i) {
+            if (image_f1_list[i].empty()) {
+                std::cout << "stitchingImage() [Error]: Image " << i << " is empty or invalid." << std::endl;
+                if (status) *status = -2;
+                return {};
             }
-            if (current_x_end > image_pos_info[0][1]) {
-                image_pos_info[0][1] = current_x_end;
-            }
-            if (current_y_start < image_pos_info[0][2]) {
-                image_pos_info[0][2] = current_y_start;
-            }
-            if (current_y_end > image_pos_info[0][3]) {
-                image_pos_info[0][3] = current_y_end;
-            }
-
-            image_pos_info.emplace_back(
-                    std::vector<int>{current_x_start, current_x_end, current_y_start, current_y_end});  // add
         }
 
-        return image_pos_info;
-    }
+        // 计算全局 min / max，以保持一致的缩放
+        double global_min = DBL_MAX;
+        double global_max = -DBL_MAX;
+        for (const auto &img : image_f1_list) {
+            double min_val, max_val;
+            cv::minMaxLoc(img, &min_val, &max_val);
+            global_min = cv::min(global_min, min_val);
+            global_max = cv::max(global_max, max_val);
+        }
 
-    static std::vector<std::vector<double>>
-    stitchingImage(std::vector<SpmReader> &spm_reader_list, std::vector<std::vector<int>> &image_pos_info) {
+        if (global_max - global_min < 1e-12) {
+            std::cout << "stitchingImage() [Error]: Global min and max are too close — cannot normalize." << std::endl;
+            if (status) *status = -3;
+            return {};
+        }
+
+        // 归一化并转换为 3 通道图像
+        std::vector<cv::Mat> image_u3_list;
+        for (const auto &float_image : image_f1_list) {
+            cv::Mat normalized, image_u1, image_u3;
+
+            normalized = (float_image - global_min) / (global_max - global_min) * 255.0;  // 使用全局最小最大值进行归一化到 [0, 255]
+            normalized.convertTo(image_u1, CV_8U);  // 转换为 8 位单通道
+            cv::cvtColor(image_u1, image_u3, cv::COLOR_GRAY2BGR);  // 转换为 3 通道 BGR 图像
+
+            image_u3_list.emplace_back(image_u3);
+        }
+
+        // 创建拼接器
+        cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
+
+        // 设置拼接参数（可选）
+        // stitcher->setRegistrationResol(0.6);  // 配准分辨率
+        // stitcher->setSeamEstimationResol(0.1); // 接缝估计分辨率
+        // stitcher->setCompositingResol(-1);     // 合成分辨率，-1表示使用原始分辨率
+
+        // 执行拼接
+        cv::Mat pano;
+        cv::Stitcher::Status stitching_status = stitcher->stitch(image_u3_list, pano);
+
+        if (stitching_status != cv::Stitcher::Status::OK) {
+            std::cout << "stitchingImage() [Error]: OpenCV stitching failed (code = "
+                      << static_cast<int>(stitching_status) << ")." << std::endl;
+            if (status) *status = -5;
+            return {};
+        }
+
+        if (pano.empty() || pano.rows <= 0 || pano.cols <= 0) {
+            std::cout << "stitchingImage() [Error]: Output panorama is empty after stitching." << std::endl;
+            if (status) *status = -6;
+            return {};
+        }
+
+        // 反向转换
+        cv::cvtColor(pano, pano, cv::COLOR_BGR2GRAY);
+        pano.convertTo(pano, CV_64F);
+        pano = pano / 255.0 * (global_max - global_min) + global_min;
+
         // 结果图像的尺寸，应为 正方形 且为 64 的倍数
-        int stitching_image_rows = image_pos_info[0][3] - image_pos_info[0][2];
-        int stitching_image_cols = image_pos_info[0][1] - image_pos_info[0][0];
-        if (stitching_image_rows < stitching_image_cols) {
-            int col_add_num = 64 - stitching_image_cols % 64;
-            image_pos_info[0][1] += col_add_num;
-            stitching_image_cols += col_add_num;
-            image_pos_info[0][3] += (stitching_image_cols - stitching_image_rows);
-            stitching_image_rows = stitching_image_cols;
-        } else {
-            int row_add_num = 64 - stitching_image_rows % 64;
-            image_pos_info[0][3] += row_add_num;
-            stitching_image_rows += row_add_num;
-            image_pos_info[0][1] += (stitching_image_rows - stitching_image_cols);
-            stitching_image_cols = stitching_image_rows;
-        }
+        int target_size = std::max(pano.rows, pano.cols);
+        if (target_size % 64 != 0) target_size += 64 - (target_size % 64);
 
         // 初始化
-        std::vector<std::vector<double>> stitching_image_data(stitching_image_rows,
-                                                              std::vector<double>(stitching_image_cols, 0));
-
-        for (int index = 0; index < spm_reader_list.size(); ++index) {  // 图像层
-            for (int r = 0; r < spm_reader_list[index].getImageSingle().getRows(); ++r) {
-                for (int c = 0; c < spm_reader_list[index].getImageSingle().getCols(); ++c) {
-                    double value = spm_reader_list[index].getImageRealDataSingle()[r][c];
-                    int target_r = image_pos_info[index + 1][2] - image_pos_info[0][2] + r;
-                    int target_c = image_pos_info[index + 1][0] - image_pos_info[0][0] + c;
-                    if (stitching_image_data[target_r][target_c] == 0) {
-                        stitching_image_data[target_r][target_c] = value;
-                    }
-//                    else {
-//                        stitching_image_data[target_r][c] = (stitching_image_data[target_r][c] + value) / 2;
-//                    }
-                }
+        std::vector<std::vector<double>> stitching_image(target_size, std::vector<double>(target_size, global_min));
+        for (int r = 0; r < pano.rows; ++r) {
+            for (int c = 0; c < pano.cols; ++c) {
+                stitching_image[r][c] = pano.at<double>(r, c);
             }
         }
 
-        return stitching_image_data;
+        std::cout << "stitchingImage() [Info]: Stitching successful. Output size: "
+                  << target_size << "x" << target_size << std::endl;
+
+        if (status) *status = 0;
+        return stitching_image;
     }
 
     static double calcNewZScale(SpmReader &spm_reader, std::vector<std::vector<double>> &stitching_image_data) {
@@ -233,7 +211,8 @@ private:
     }
 
     static std::vector<char>
-    calcRawDataToByteData(SpmReader &spm_reader, std::vector<std::vector<double>> &stitching_image_data, double z_scale) {
+    calcRawDataToByteData(SpmReader &spm_reader, std::vector<std::vector<double>> &stitching_image_data,
+                          double z_scale) {
         double z_scale_sens = spm_reader.getImageSingle().getZScaleSens();
         int power_num = 8 * spm_reader.getImageSingle().getBytesPerPixel();
 
@@ -316,7 +295,7 @@ private:
 
         fclose(spm_file_index);
 
-        // write
+// write
 #ifdef _MSC_VER
         FILE *spm_file = nullptr;
         errno_t err = _wfopen_s(&spm_file, string2wstring(tmpl_spm_path).c_str(), L"r");
@@ -375,6 +354,10 @@ private:
             }
             if (image_num == image_index && line.substr(0, 18) == "\\Valid data len Y:") {
                 replaceIntFromTextByRegex(R"(\Valid data len Y: (\d+))", line, new_number_of_lines);
+                line_w = string2wstring(line);
+            }
+            if (line.substr(0, 11) == "\\Scan Size:") {
+                replaceIntFromTextByRegex(R"(\Scan Size: (\d+) nm)", line, new_scan_size);
                 line_w = string2wstring(line);
             }
 
@@ -443,8 +426,6 @@ private:
 
 private:
     int m_data_length{};
-
-    cv::Mat m_stitched_image;
 };
 
 

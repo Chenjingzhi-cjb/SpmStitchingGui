@@ -347,6 +347,10 @@ public:
     ~SpmReader() = default;
 
 public:
+    std::string getSpmPath() const { return m_spm_path; }
+
+    std::vector<std::string> getImageTypeList() const { return m_image_type_list; }
+
     bool readSpm() {
         if (m_spm_path.empty() || m_image_type_list.empty()) return false;
 
